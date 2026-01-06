@@ -547,8 +547,6 @@ function addPrescription(patUsername) {
     // Check if fields are empty
     if(!nameInput.value || !doseInput.value) return showCustomAlert('Error', "Fill both fields");
 
-    // NEW LOGIC: Check if dose is > 0
-    // We attempt to parse the string "500mg" to 500.
     const doseValue = parseFloat(doseInput.value);
 
     // If it's not a number (NaN) or less than or equal to 0
@@ -584,15 +582,120 @@ function supervise(patId) {
 function loadChatList() {
     const list = document.getElementById('chat-users');
     let peopleSet = new Set();
-    if(session.role === 'patient') { DB.relations.filter(r => r.pat === session.username && r.status === 'active').forEach(r => peopleSet.add(r.doc)); } 
-    else { DB.relations.filter(r => r.doc === session.username && r.status === 'active').forEach(r => peopleSet.add(r.pat)); }
+    const myUsername = session.username;
+
+    // 1. Direct Connections (Patient <-> Doctor/Caregiver)
+    if(session.role === 'patient') { 
+        DB.relations.filter(r => r.pat === myUsername && r.status === 'active').forEach(r => peopleSet.add(r.doc)); 
+    } else { 
+        // If I am Doctor or Caregiver, add my patients
+        DB.relations.filter(r => r.doc === myUsername && r.status === 'active').forEach(r => peopleSet.add(r.pat)); 
+        
+        // 2. INDIRECT CONNECTIONS (Doctor <-> Caregiver via common Patients)
+        // First, find all my patients
+        const myPatients = DB.relations
+            .filter(r => r.doc === myUsername && r.status === 'active')
+            .map(r => r.pat);
+            
+        // Now, find who else is monitoring these patients
+        myPatients.forEach(patId => {
+            // Find relations where pat is my patient, but doc is NOT me
+            const colleagues = DB.relations
+                .filter(r => r.pat === patId && r.doc !== myUsername && r.status === 'active')
+                .map(r => r.doc);
+            
+            colleagues.forEach(colleagueId => peopleSet.add(colleagueId));
+        });
+    }
+
     const people = Array.from(peopleSet);
-    if(people.length === 0) { list.innerHTML = '<div style="padding:10px; color:var(--text-muted); text-align:center;">No contacts.</div>'; return; }
-    list.innerHTML = people.map(uid => { const u = DB.users.find(x => x.username === uid); if(!u) return ''; return `<div onclick="openChat('${uid}')" style="cursor:pointer;"><strong>${u.name}</strong> <small>(${u.role})</small></div>`; }).join('');
+    
+    if(people.length === 0) { 
+        list.innerHTML = '<div style="padding:20px; color:var(--text-muted); text-align:center; font-style:italic;">No contacts yet.</div>'; 
+        return; 
+    }
+    
+    list.innerHTML = people.map(uid => { 
+        const u = DB.users.find(x => x.username === uid); 
+        if(!u) return ''; 
+        
+        // Set icon based on role
+        let iconClass = 'fa-user';
+        if(u.role === 'doctor') iconClass = 'fa-user-doctor';
+        if(u.role === 'caregiver') iconClass = 'fa-hand-holding-heart';
+        
+        const isActive = activeChat === uid ? 'active' : '';
+
+        // ** NEW LOGIC: SHOW PATIENT NAME IF USER IS CAREGIVER AND I AM DOCTOR **
+        let roleDisplay = u.role;
+        if(session.role === 'doctor' && u.role === 'caregiver') {
+            // Find relations where this caregiver is monitoring a patient
+            const linkedPatients = DB.relations
+                .filter(r => r.doc === u.username && r.status === 'active')
+                .map(r => DB.users.find(user => user.username === r.pat)) // Get patient object
+                .filter(p => p !== undefined)
+                .map(p => p.name); // Get just the name
+            
+            if(linkedPatients.length > 0) {
+                roleDisplay = `Caregiver for: ${linkedPatients.join(', ')}`;
+            }
+        }
+
+        return `
+        <div class="chat-user-item ${isActive}" onclick="openChat('${uid}')">
+            <div class="chat-avatar"><i class="fa-solid ${iconClass}"></i></div>
+            <div class="chat-info">
+                <div class="chat-name">${u.name}</div>
+                <div class="chat-role">${roleDisplay}</div>
+            </div>
+        </div>`; 
+    }).join('');
 }
-function openChat(targetId) { nav('messages'); activeChat = targetId; const u = DB.users.find(x => x.username === targetId); document.getElementById('chat-title').innerHTML = `<i class="fa-solid fa-circle-user"></i> ${u.name}`; renderChat(); }
-function renderChat() { if(!activeChat) return; const msgs = DB.messages.filter(m => (m.from === session.username && m.to === activeChat) || (m.from === activeChat && m.to === session.username)); const box = document.getElementById('chat-box'); box.innerHTML = msgs.map(m => `<div class="chat-bubble" style="align-self:${m.from === session.username ? 'flex-end' : 'flex-start'}; background:${m.from === session.username ? 'var(--primary)' : 'var(--input-bg)'}; color:${m.from === session.username ? '#fff' : 'var(--text-main)'}; padding:8px 12px; border-radius:12px;">${m.txt}</div>`).join(''); box.scrollTop = box.scrollHeight; }
-function sendMsg() { const txt = document.getElementById('msg-input').value; if(!txt || !activeChat) return; DB.messages.push({ from: session.username, to: activeChat, txt: txt, ts: Date.now() }); save(); document.getElementById('msg-input').value = ''; renderChat(); }
+
+function openChat(targetId) { 
+    activeChat = targetId; 
+    const u = DB.users.find(x => x.username === targetId); 
+    
+    // Update Chat Title Header
+    let iconClass = 'fa-user';
+    if(u.role === 'doctor') iconClass = 'fa-user-doctor';
+    if(u.role === 'caregiver') iconClass = 'fa-hand-holding-heart';
+    
+    document.getElementById('chat-title').innerHTML = `
+        <div style="width:35px; height:35px; background:var(--primary); color:#fff; border-radius:50%; display:flex; align-items:center; justify-content:center;">
+            <i class="fa-solid ${iconClass}"></i>
+        </div>
+        <div>
+            <div>${u.name}</div>
+            <div style="font-size:0.75rem; color:var(--text-muted); font-weight:400; text-transform:uppercase;">${u.role}</div>
+        </div>
+    `; 
+    
+    nav('messages'); // Switch view if not already there
+    loadChatList(); // Refresh list to update active class
+    renderChat(); 
+}
+
+function renderChat() { 
+    if(!activeChat) return; 
+    const msgs = DB.messages.filter(m => (m.from === session.username && m.to === activeChat) || (m.from === activeChat && m.to === session.username)); 
+    const box = document.getElementById('chat-box'); 
+    box.innerHTML = msgs.map(m => `
+        <div class="chat-bubble" style="align-self:${m.from === session.username ? 'flex-end' : 'flex-start'}; background:${m.from === session.username ? 'var(--primary)' : 'var(--input-bg)'}; color:${m.from === session.username ? '#fff' : 'var(--text-main)'}; padding:10px 14px; border-radius:12px;">
+            ${m.txt}
+        </div>
+    `).join(''); 
+    box.scrollTop = box.scrollHeight; 
+}
+
+function sendMsg() { 
+    const txt = document.getElementById('msg-input').value; 
+    if(!txt || !activeChat) return; 
+    DB.messages.push({ from: session.username, to: activeChat, txt: txt, ts: Date.now() }); 
+    save(); 
+    document.getElementById('msg-input').value = ''; 
+    renderChat(); 
+}
 function save() { localStorage.setItem('mm_users', JSON.stringify(DB.users)); localStorage.setItem('mm_rels', JSON.stringify(DB.relations)); localStorage.setItem('mm_msgs', JSON.stringify(DB.messages)); localStorage.setItem('mm_notifs', JSON.stringify(DB.notifications)); }
 function getAge(dob) { if(!dob) return 'N/A'; const birthDate = new Date(dob); if(isNaN(birthDate.getTime())) return 'N/A'; const diff = Date.now() - birthDate.getTime(); const ageDate = new Date(diff); return Math.abs(ageDate.getUTCFullYear() - 1970); }
 
