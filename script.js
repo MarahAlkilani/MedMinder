@@ -1,3 +1,5 @@
+/* script.js - Final Clean Version (No Duplicates) */
+
 function toggleSidebar() {
     const sb = document.getElementById('app-sidebar');
     const overlay = document.getElementById('sidebar-overlay');
@@ -38,12 +40,17 @@ function updateThemeIcon(theme) {
         if(loginIcon) loginIcon.className = 'fa-solid fa-moon';
     }
 }
+
+// --- DATA SIMULATION ---
+const defaultNotifs = [];
+
 const DB = {
     users: JSON.parse(localStorage.getItem('mm_users')) || [],
     relations: JSON.parse(localStorage.getItem('mm_rels')) || [], 
     messages: JSON.parse(localStorage.getItem('mm_msgs')) || [],
-    notifications: JSON.parse(localStorage.getItem('mm_notifs')) || [] 
+    notifications: JSON.parse(localStorage.getItem('mm_notifs')) || defaultNotifs 
 };
+
 let session = JSON.parse(localStorage.getItem('mm_sess')) || null;
 let activeChat = null;
 let historyChart = null; 
@@ -51,17 +58,87 @@ let patientTrendChart = null;
 let patientAdherenceChart = null;
 let supervisorPrimaryChart = null;
 let supervisorSecondaryChart = null;
+let reminderInterval = null;
+
+// --- ALERT LOGIC (GENERIC) ---
 function showCustomAlert(title, msg) {
+    const alertBox = document.getElementById('custom-alert');
+    if(!alertBox.classList.contains('hidden')) return;
+
     document.getElementById('custom-alert-title').innerText = title;
     document.getElementById('custom-alert-msg').innerText = msg;
-    document.getElementById('custom-alert').classList.remove('hidden');
+    
+    document.getElementById('alert-actions').innerHTML = `
+        <button class="btn btn-outline" onclick="closeCustomAlert()" style="flex:1;">Close</button>
+    `;
+    
+    alertBox.classList.remove('hidden');
+    if(title.includes('Critical') || title.includes('SOS')) playAlertSound();
 }
-function closeCustomAlert() { document.getElementById('custom-alert').classList.add('hidden'); }
+
+// --- MEDICATION ALERT LOGIC (INTERACTIVE) ---
+function showMedicationAlert(medName, medDose) {
+    const alertBox = document.getElementById('custom-alert');
+    
+    document.getElementById('custom-alert-title').innerText = "Medication Time";
+    document.getElementById('custom-alert-msg').innerText = `It is time to take your medicine:\n\n${medName} (${medDose})`;
+    
+    document.getElementById('alert-actions').innerHTML = `
+        <button class="btn btn-success" style="background:var(--success); color:#fff; flex:1;" onclick="confirmTakeMed('${medName}')">Take Now</button>
+        <button class="btn btn-outline" style="flex:1; border-color:var(--danger); color:var(--danger);" onclick="handleMissedMed('${medName}')">Later</button>
+    `;
+    
+    alertBox.classList.remove('hidden');
+    playAlertSound();
+}
+
+function confirmTakeMed(medName) {
+    toggleMedStatus(session.username, medName); 
+    closeCustomAlert();
+}
+
+function handleMissedMed(medName) {
+    closeCustomAlert();
+    // Notify Caregiver & Doctor immediately (Using the fixed function)
+    notifyCareTeam(session.username, `⚠️ MISSED MEDICATION: ${session.name} clicked 'Later' for ${medName}.`);
+}
+
+function closeCustomAlert() { 
+    document.getElementById('custom-alert').classList.add('hidden'); 
+    const audio = document.getElementById('alert-sound');
+    if(audio) { audio.pause(); audio.currentTime = 0; }
+}
+
+function playAlertSound() {
+    const audio = document.getElementById('alert-sound');
+    if(audio) {
+        audio.currentTime = 0;
+        audio.play().catch(e => console.log("Audio play failed (interaction needed):", e));
+    }
+}
+
+function requestNotifPermission() {
+    if (!("Notification" in window)) return;
+    Notification.requestPermission().then(permission => {
+        if (permission === "granted") {
+            document.getElementById('notif-permission-banner').classList.add('hidden');
+        }
+    });
+}
+
+function sendBrowserNotification(title, body) {
+    if (Notification.permission === "granted") {
+        new Notification(title, { body: body, icon: 'https://cdn-icons-png.flaticon.com/512/3063/3063823.png' });
+    }
+}
+
+// --- AUTH LOGIC ---
 function triggerForgot() {
     const u = document.getElementById('auth-user').value;
     let msg = u ? `Email sent to address associated with: ${u}.` : "Email sent to registered address.";
     showCustomAlert('Password Reset', msg);
 }
+
 function switchAuth(mode) {
     const isReg = mode === 'register';
     document.getElementById('register-fields').className = isReg ? '' : 'hidden';
@@ -92,7 +169,8 @@ function handleAuth(e) {
             username: u, password: p, name: name, role: role,
             profile: { dob:'', blood:'', height:'', weight:'', allergies:'', conditions:'', ecName:'', ecPhone:'' },
             vitals: [],
-            medications: [] 
+            medications: [],
+            lastLoginDate: new Date().toLocaleDateString()
         };
         DB.users.push(newUser);
         save();
@@ -111,7 +189,13 @@ function login(user) {
     document.getElementById('app-main').classList.remove('hidden');
     initApp();
 }
-function logout() { localStorage.removeItem('mm_sess'); location.reload(); }
+
+function logout() { 
+    if(reminderInterval) clearInterval(reminderInterval);
+    localStorage.removeItem('mm_sess'); 
+    location.reload(); 
+}
+
 function initApp() {
     document.getElementById('sb-name').innerText = session.name;
     document.getElementById('sb-role').innerText = session.role;
@@ -131,13 +215,21 @@ function initApp() {
         document.getElementById('sos-btn').classList.remove('hidden');
         document.getElementById('dash-patient').classList.remove('hidden');
         document.getElementById('nav-profile').classList.remove('hidden');
+        
+        if ("Notification" in window && Notification.permission !== "granted") {
+            document.getElementById('notif-permission-banner').classList.remove('hidden');
+        }
+
+        checkDailyReset(); 
         loadPatientDash();
+        checkMedicationReminders();
+        reminderInterval = setInterval(checkMedicationReminders, 20000); 
+        
     } else {
         if(session.role === 'caregiver') {
             badge.innerText = 'CAREGIVER ACCESS';
             badge.style.background = 'var(--caregiver-bg)'; badge.style.color = 'var(--caregiver)';
             document.getElementById('caregiver-alerts-section').classList.remove('hidden');
-            loadAlerts();
         } else {
             badge.innerText = 'DOCTOR PORTAL';
             badge.style.background = 'var(--primary-light)'; badge.style.color = 'var(--primary)';
@@ -145,8 +237,92 @@ function initApp() {
         }
         document.getElementById('dash-supervisor').classList.remove('hidden');
         loadSupervisorDash();
+        loadAlerts(); 
+        setInterval(loadAlerts, 10000); 
     }
     nav('dashboard');
+}
+
+function checkDailyReset() {
+    const today = new Date().toLocaleDateString();
+    if (session.lastLoginDate !== today) {
+        if (session.medications) {
+            session.medications.forEach(m => {
+                m.taken = false;
+                m.lastAlertDate = ""; 
+            });
+            const idx = DB.users.findIndex(u => u.username === session.username);
+            session.lastLoginDate = today;
+            DB.users[idx] = session;
+            save();
+        }
+    }
+}
+
+function checkMedicationReminders() {
+    if(!session.medications || session.medications.length === 0) return;
+    
+    const now = new Date();
+    const currentHour = now.getHours();
+    const currentMin = now.getMinutes();
+    const todayStr = now.toLocaleDateString();
+    
+    let updated = false;
+
+    session.medications.forEach(med => {
+        if(med.taken) return; 
+        if(med.timeHr === undefined || med.timeMin === undefined) return; 
+
+        const medHr = parseInt(med.timeHr);
+        const medMin = parseInt(med.timeMin);
+
+        if(currentHour === medHr && currentMin === medMin) {
+             if (med.lastAlertDate !== todayStr) {
+                showMedicationAlert(med.name, med.dose);
+                sendBrowserNotification('Medication Time', `Take ${med.name} now.`);
+                
+                med.lastAlertDate = todayStr;
+                updated = true;
+             }
+        }
+    });
+
+    if(updated) {
+        const idx = DB.users.findIndex(u => u.username === session.username);
+        DB.users[idx] = session;
+        save();
+    }
+}
+
+function pad(n) { return n < 10 ? '0'+n : n; }
+
+// --- FIXED NOTIFICATION SYSTEM (NO DUPLICATES) ---
+function notifyCareTeam(patientId, message) {
+    const relations = DB.relations.filter(r => r.pat === patientId && r.status === 'active');
+    
+    relations.forEach(rel => {
+        // Check if a notification with the SAME message and SAME sender already exists
+        const duplicateIndex = DB.notifications.findIndex(n => 
+            n.to === rel.doc && 
+            n.from === patientId && 
+            n.msg === message
+        );
+
+        if (duplicateIndex > -1) {
+            // Found a duplicate! Do NOT add a new one.
+            // Just update the timestamp of the existing one to bring it to top.
+            DB.notifications[duplicateIndex].date = new Date().toLocaleString();
+        } else {
+            // No duplicate found, create new notification
+            DB.notifications.push({
+                to: rel.doc,
+                from: patientId,
+                msg: message,
+                date: new Date().toLocaleString()
+            });
+        }
+    });
+    save();
 }
 
 function nav(view) {
@@ -264,7 +440,7 @@ function renderSupervisorCharts() {
                 labels: ['Critical', 'Stable'],
                 datasets: [{
                     data: [critical, normal],
-                    backgroundColor: [themeColors.danger, themeColors.success] // Rose vs Teal
+                    backgroundColor: [themeColors.danger, themeColors.success] 
                 }]
             },
             options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: 'Patient Status Distribution' } } }
@@ -354,7 +530,13 @@ function toggleMedStatus(targetPatId, medName) {
         const med = DB.users[patIdx].medications.find(m => m.name === medName);
         if(med) {
             med.taken = !med.taken;
-            if(session.username === targetPatId) session.medications = DB.users[patIdx].medications;
+            if(session.username === targetPatId) {
+                session.medications = DB.users[patIdx].medications;
+            }
+            
+            if(med.taken) {
+                notifyCareTeam(targetPatId, `✅ Medication Taken: ${DB.users[patIdx].name} took ${medName}`);
+            }
             save();
             if(session.role === 'patient') loadPatientDash(); else loadSupervisorDash();
         }
@@ -366,7 +548,10 @@ function renderMedsPatient(meds) {
     if(!meds || meds.length === 0) { el.innerHTML = `<p style="color:var(--text-muted); font-style:italic;">No medications assigned.</p>`; return; }
     el.innerHTML = meds.map(m => `
         <div class="med-row">
-            <div class="med-details"><strong style="text-decoration: ${m.taken ? 'line-through' : 'none'}; color: ${m.taken ? 'var(--text-muted)' : 'var(--text-main)'}">${m.name}</strong><span class="med-dose">${m.dose}</span></div>
+            <div class="med-details">
+                <strong style="text-decoration: ${m.taken ? 'line-through' : 'none'}; color: ${m.taken ? 'var(--text-muted)' : 'var(--text-main)'}">${m.name}</strong>
+                <span class="med-dose">${m.dose} ${m.timeHr !== undefined ? ` <b style="color:var(--primary)">@ ${pad(m.timeHr)}:${pad(m.timeMin)}</b>` : ''}</span>
+            </div>
             <div style="display:flex; align-items:center; gap:10px;"><span style="font-size:0.8rem; color:${m.taken ? 'var(--success)' : 'var(--danger)'}">${m.taken ? 'Taken' : 'Pending'}</span><input type="checkbox" class="med-checkbox" ${m.taken ? 'checked' : ''} onchange="toggleMedStatus('${session.username}', '${m.name}')"></div>
         </div>
     `).join('');
@@ -388,7 +573,7 @@ function addVital() {
     }
     if(status === 'Critical') {
         showCustomAlert('Critical Alert', '⚠️ Critical Vitals detected! Alert sent to Care Team.');
-        createNotification(session.username, 'Critical Vitals Recorded: ' + type + ' - ' + val);
+        notifyCareTeam(session.username, 'Critical Vitals Recorded: ' + type + ' - ' + val);
     }
     const entry = { type, val, note, status, date: new Date().toLocaleString() };
     session.vitals.unshift(entry);
@@ -400,18 +585,16 @@ function addVital() {
     document.getElementById('vital-val').value = '';
 }
 
-function createNotification(patientId, msg) {
-    const sups = DB.relations.filter(r => r.pat === patientId && (r.status === 'active' || r.status === undefined));
-    sups.forEach(rel => { DB.notifications.push({ to: rel.doc, from: patientId, msg: msg, date: new Date().toLocaleString() }); });
-    save();
-}
-
 function renderLogs(logs, containerId) {
     const el = document.getElementById(containerId);
     const recent = logs.slice(0, 3);
     el.innerHTML = recent.map(l => `<div style="display:flex; justify-content:space-between; align-items:center; padding:10px; border-bottom:1px solid var(--border);"><div><div style="font-weight:600;">${l.type}</div><div style="font-size:0.8rem; color:var(--text-muted);">${l.date} ${l.note ? `• ${l.note}` : ''}</div></div><div style="text-align:right;"><div style="font-weight:700; font-size:1.1rem;">${l.val}</div><span class="vital-badge ${l.status === 'Critical' ? 'status-critical' : 'status-normal'}">${l.status}</span></div></div>`).join('');
 }
-function triggerSOS() { showCustomAlert('SOS Triggered', '🚨 EMERGENCY ALERT SENT!\nGPS Location and Profile shared with Emergency Contacts.'); createNotification(session.username, '🚨 SOS EMERGENCY ALERT TRIGGERED'); }
+
+function triggerSOS() { 
+    showCustomAlert('SOS Triggered', '🚨 EMERGENCY ALERT SENT!\nGPS Location and Profile shared with Emergency Contacts.'); 
+    notifyCareTeam(session.username, '🚨 SOS EMERGENCY ALERT TRIGGERED'); 
+}
 
 function loadProfile() {
     const p = session.profile;
@@ -444,9 +627,14 @@ function saveProfile() {
 function loadAlerts() {
     const alerts = DB.notifications.filter(n => n.to === session.username);
     const el = document.getElementById('alerts-list');
-    if(alerts.length === 0) { el.innerHTML = '<p style="color:var(--text-muted);">No active alerts.</p>'; } 
-    else {
-        el.innerHTML = alerts.slice(-3).reverse().map(a => {
+    
+    // Sort by date descending (newest first)
+    const sortedAlerts = alerts.reverse().slice(0, 5);
+    
+    if(sortedAlerts.length === 0) { 
+        el.innerHTML = '<p style="color:var(--text-muted);">No active alerts.</p>'; 
+    } else {
+        el.innerHTML = sortedAlerts.map(a => {
             const pat = DB.users.find(u => u.username === a.from);
             return `<div class="alert-item"><div style="font-size:1.5rem; color:var(--danger);"><i class="fa-solid fa-triangle-exclamation"></i></div><div class="alert-content"><strong>${a.msg}</strong><br><small>Patient: ${pat ? pat.name : 'Unknown'} • ${a.date}</small></div></div>`;
         }).join('');
@@ -481,11 +669,25 @@ function loadSupervisorDash() {
         const last = p.vitals[0] || {type:'N/A', val:'-'};
         let medListHTML = '';
         if (isDoctor) {
-            medListHTML = p.medications.map(m => `<li style="display:flex; justify-content:space-between; align-items:center; margin-bottom:5px;"><span style="text-decoration: ${m.taken ? 'line-through' : 'none'}; color: ${m.taken ? 'var(--text-muted)' : 'var(--text-main)'}">${m.name} (${m.dose})</span><span style="font-size:0.7rem; padding:2px 6px; border-radius:4px; background:${m.taken ? 'var(--success-bg)' : '#fef3c7'}; color:${m.taken ? 'var(--success)' : '#d97706'}">${m.taken ? 'Taken' : 'Pending'}</span></li>`).join('') || '<small>No meds.</small>';
+            medListHTML = p.medications.map(m => `<li style="display:flex; justify-content:space-between; align-items:center; margin-bottom:5px;"><span style="text-decoration: ${m.taken ? 'line-through' : 'none'}; color: ${m.taken ? 'var(--text-muted)' : 'var(--text-main)'}">${m.name} (${m.dose}) @ ${pad(m.timeHr)}:${pad(m.timeMin)}</span><span style="font-size:0.7rem; padding:2px 6px; border-radius:4px; background:${m.taken ? 'var(--success-bg)' : '#fef3c7'}; color:${m.taken ? 'var(--success)' : '#d97706'}">${m.taken ? 'Taken' : 'Pending'}</span></li>`).join('') || '<small>No meds.</small>';
         } else {
-            medListHTML = p.medications.map(m => `<li style="display:flex; justify-content:space-between; align-items:center; margin-bottom:5px;"><span style="text-decoration: ${m.taken ? 'line-through' : 'none'}; color: ${m.taken ? 'var(--text-muted)' : 'var(--text-main)'}">${m.name} (${m.dose})</span><div style="display:flex; align-items:center; gap:5px;"><span style="font-size:0.7rem; color:${m.taken ? 'var(--success)' : '#d97706'}">${m.taken ? 'Taken' : 'Pending'}</span><input type="checkbox" class="med-checkbox" style="width:16px; height:16px;" ${m.taken ? 'checked' : ''} onchange="toggleMedStatus('${p.username}', '${m.name}')"></div></li>`).join('') || '<small>No meds.</small>';
+            medListHTML = p.medications.map(m => `<li style="display:flex; justify-content:space-between; align-items:center; margin-bottom:5px;"><span style="text-decoration: ${m.taken ? 'line-through' : 'none'}; color: ${m.taken ? 'var(--text-muted)' : 'var(--text-main)'}">${m.name} (${m.dose}) @ ${pad(m.timeHr)}:${pad(m.timeMin)}</span><div style="display:flex; align-items:center; gap:5px;"><span style="font-size:0.7rem; color:${m.taken ? 'var(--success)' : '#d97706'}">${m.taken ? 'Taken' : 'Pending'}</span><input type="checkbox" class="med-checkbox" style="width:16px; height:16px;" ${m.taken ? 'checked' : ''} onchange="toggleMedStatus('${p.username}', '${m.name}')"></div></li>`).join('') || '<small>No meds.</small>';
         }
-        const addMedSection = isDoctor ? `<div style="background:var(--card-bg); padding:10px; border-radius:8px; margin-bottom:15px;"><small>Add Medication:</small><div style="display:flex; gap:5px; margin-top:5px;"><input type="text" id="new-med-name-${p.username}" placeholder="Name" class="input-field" style="padding:5px;"><input type="text" id="new-med-dose-${p.username}" placeholder="Dose" class="input-field" style="padding:5px;"></div><button class="btn btn-primary btn-sm" style="width:100%; margin-top:5px;" onclick="addPrescription('${p.username}')">Add Med</button></div>` : ``; 
+        
+        const addMedSection = isDoctor ? `
+        <div style="background:var(--card-bg); padding:10px; border-radius:8px; margin-bottom:15px;">
+            <small>Add Medication with Exact Timer:</small>
+            <div style="display:flex; gap:5px; margin-top:5px;">
+                <input type="text" id="new-med-name-${p.username}" placeholder="Name" class="input-field" style="padding:5px; flex:2;">
+                <input type="text" id="new-med-dose-${p.username}" placeholder="Dose" class="input-field" style="padding:5px; flex:1;">
+            </div>
+            <div style="display:flex; gap:5px; margin-top:5px;">
+                <input type="number" id="new-med-time-hr-${p.username}" placeholder="Hr (0-23)" class="input-field" style="padding:5px;" min="0" max="23">
+                <input type="number" id="new-med-time-min-${p.username}" placeholder="Min (0-59)" class="input-field" style="padding:5px;" min="0" max="59">
+            </div>
+            <button class="btn btn-primary btn-sm" style="width:100%; margin-top:5px;" onclick="addPrescription('${p.username}')">Add Med</button>
+        </div>` : ``; 
+        
         return `<div style="background:var(--input-bg); border:1px solid var(--border); border-radius:12px; padding:20px;"><div style="display:flex; justify-content:space-between; margin-bottom:10px;"><strong>${p.name}</strong><span style="font-size:0.8rem; background:var(--card-bg); padding:2px 8px; border:1px solid var(--border); border-radius:10px;">Age: ${getAge(p.profile.dob)}</span></div><div style="margin-bottom:15px; border-bottom:1px solid var(--border); padding-bottom:10px;"><small style="color:var(--text-muted);">Health Summary (Meds):</small><ul style="margin:5px 0 0 15px; padding:0; font-size:0.85rem;">${medListHTML}</ul></div>${addMedSection}<div style="background:var(--card-bg); padding:10px; border-radius:8px; margin-bottom:15px;"><small>Latest Vital:</small><br><strong>${last.type}: ${last.val}</strong><br><span style="font-size:0.8rem; color:${last.status === 'Critical' ? 'var(--danger)' : 'var(--success)'}">${last.status || ''}</span></div><div style="display:flex; gap:10px;"><button class="btn btn-outline" style="flex:1; font-size:0.8rem;" onclick="openChat('${p.username}')">Message</button><button class="btn btn-primary" style="flex:1; font-size:0.8rem;" onclick="viewHistory('${p.username}')">View Full History</button></div></div>`;
     }).join('');
 }
@@ -540,25 +742,38 @@ function viewHistory(patUsername) {
 }
 
 function closeHistory() { document.getElementById('history-overlay').classList.add('hidden'); }
+
 function addPrescription(patUsername) {
     const nameInput = document.getElementById(`new-med-name-${patUsername}`);
     const doseInput = document.getElementById(`new-med-dose-${patUsername}`);
+    const timeHrInput = document.getElementById(`new-med-time-hr-${patUsername}`);
+    const timeMinInput = document.getElementById(`new-med-time-min-${patUsername}`);
     
-    // Check if fields are empty
-    if(!nameInput.value || !doseInput.value) return showCustomAlert('Error', "Fill both fields");
+    if(!nameInput.value || !doseInput.value || !timeHrInput.value || !timeMinInput.value) return showCustomAlert('Error', "Fill all fields (Name, Dose, Hr, Min)");
 
     const doseValue = parseFloat(doseInput.value);
+    const timeHr = parseInt(timeHrInput.value);
+    const timeMin = parseInt(timeMinInput.value);
 
-    // If it's not a number (NaN) or less than or equal to 0
-    if (isNaN(doseValue) || doseValue <= 0) {
-        return showCustomAlert('Invalid Input', 'Dose must be a number greater than 0.');
-    }
+    if (isNaN(doseValue) || doseValue <= 0) return showCustomAlert('Invalid Input', 'Dose must be > 0');
+    if (isNaN(timeHr) || timeHr < 0 || timeHr > 23) return showCustomAlert('Invalid Timer', 'Hour must be 0-23');
+    if (isNaN(timeMin) || timeMin < 0 || timeMin > 59) return showCustomAlert('Invalid Timer', 'Minute must be 0-59');
 
     const pIdx = DB.users.findIndex(u => u.username === patUsername);
     if(pIdx > -1) {
         if(!DB.users[pIdx].medications) DB.users[pIdx].medications = [];
-        DB.users[pIdx].medications.push({ name: nameInput.value, dose: doseInput.value, taken: false, date: new Date().toLocaleDateString() });
-        save(); loadSupervisorDash(); showCustomAlert('Success', "Added");
+        
+        DB.users[pIdx].medications.push({ 
+            name: nameInput.value, 
+            dose: doseInput.value, 
+            timeHr: timeHr, 
+            timeMin: timeMin,
+            taken: false,
+            lastAlertDate: "",
+            date: new Date().toLocaleDateString() 
+        });
+        
+        save(); loadSupervisorDash(); showCustomAlert('Success', "Medication Timer Set!");
     }
 }
 
@@ -584,32 +799,18 @@ function loadChatList() {
     let peopleSet = new Set();
     const myUsername = session.username;
 
-    // 1. Direct Connections (Patient <-> Doctor/Caregiver)
     if(session.role === 'patient') { 
         DB.relations.filter(r => r.pat === myUsername && r.status === 'active').forEach(r => peopleSet.add(r.doc)); 
     } else { 
-        // If I am Doctor or Caregiver, add my patients
         DB.relations.filter(r => r.doc === myUsername && r.status === 'active').forEach(r => peopleSet.add(r.pat)); 
-        
-        // 2. INDIRECT CONNECTIONS (Doctor <-> Caregiver via common Patients)
-        // First, find all my patients
-        const myPatients = DB.relations
-            .filter(r => r.doc === myUsername && r.status === 'active')
-            .map(r => r.pat);
-            
-        // Now, find who else is monitoring these patients
+        const myPatients = DB.relations.filter(r => r.doc === myUsername && r.status === 'active').map(r => r.pat);
         myPatients.forEach(patId => {
-            // Find relations where pat is my patient, but doc is NOT me
-            const colleagues = DB.relations
-                .filter(r => r.pat === patId && r.doc !== myUsername && r.status === 'active')
-                .map(r => r.doc);
-            
+            const colleagues = DB.relations.filter(r => r.pat === patId && r.doc !== myUsername && r.status === 'active').map(r => r.doc);
             colleagues.forEach(colleagueId => peopleSet.add(colleagueId));
         });
     }
 
     const people = Array.from(peopleSet);
-    
     if(people.length === 0) { 
         list.innerHTML = '<div style="padding:20px; color:var(--text-muted); text-align:center; font-style:italic;">No contacts yet.</div>'; 
         return; 
@@ -618,27 +819,15 @@ function loadChatList() {
     list.innerHTML = people.map(uid => { 
         const u = DB.users.find(x => x.username === uid); 
         if(!u) return ''; 
-        
-        // Set icon based on role
         let iconClass = 'fa-user';
         if(u.role === 'doctor') iconClass = 'fa-user-doctor';
         if(u.role === 'caregiver') iconClass = 'fa-hand-holding-heart';
-        
         const isActive = activeChat === uid ? 'active' : '';
 
-        // ** NEW LOGIC: SHOW PATIENT NAME IF USER IS CAREGIVER AND I AM DOCTOR **
         let roleDisplay = u.role;
         if(session.role === 'doctor' && u.role === 'caregiver') {
-            // Find relations where this caregiver is monitoring a patient
-            const linkedPatients = DB.relations
-                .filter(r => r.doc === u.username && r.status === 'active')
-                .map(r => DB.users.find(user => user.username === r.pat)) // Get patient object
-                .filter(p => p !== undefined)
-                .map(p => p.name); // Get just the name
-            
-            if(linkedPatients.length > 0) {
-                roleDisplay = `Caregiver for: ${linkedPatients.join(', ')}`;
-            }
+            const linkedPatients = DB.relations.filter(r => r.doc === u.username && r.status === 'active').map(r => DB.users.find(user => user.username === r.pat)).filter(p => p !== undefined).map(p => p.name);
+            if(linkedPatients.length > 0) roleDisplay = `Caregiver for: ${linkedPatients.join(', ')}`;
         }
 
         return `
@@ -655,8 +844,6 @@ function loadChatList() {
 function openChat(targetId) { 
     activeChat = targetId; 
     const u = DB.users.find(x => x.username === targetId); 
-    
-    // Update Chat Title Header
     let iconClass = 'fa-user';
     if(u.role === 'doctor') iconClass = 'fa-user-doctor';
     if(u.role === 'caregiver') iconClass = 'fa-hand-holding-heart';
@@ -670,10 +857,7 @@ function openChat(targetId) {
             <div style="font-size:0.75rem; color:var(--text-muted); font-weight:400; text-transform:uppercase;">${u.role}</div>
         </div>
     `; 
-    
-    nav('messages'); // Switch view if not already there
-    loadChatList(); // Refresh list to update active class
-    renderChat(); 
+    nav('messages'); loadChatList(); renderChat(); 
 }
 
 function renderChat() { 
