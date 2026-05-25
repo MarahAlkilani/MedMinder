@@ -61,8 +61,8 @@ Since the application uses local storage for data simulation, no backend setup i
 
 ## 👨‍💻 Authors
 
-* Marah Alkilani
-* Bayan Marashdeh
-* Salma Khalifeh
-* Tasnim Abuayyash
-* Tamerhina Abughazleh 
+* Marah Alkilani https://github.com/MarahAlkilani
+* Bayan Marashdeh https://github.com/bayan1166
+* Salma Khalifeh https://github.com/salmakhalifeh
+* Tasnim Abuayyash https://github.com/ta099l
+* Tamerhina Abughazleh https://github.com/tamerhinaabughazleh-png
